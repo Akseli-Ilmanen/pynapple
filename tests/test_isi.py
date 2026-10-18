@@ -1,6 +1,7 @@
 """Tests of burst detection in pynapple.process.isi"""
 
 import re
+import warnings
 from contextlib import nullcontext as does_not_raise
 
 import numpy as np
@@ -346,23 +347,48 @@ def test_log_isi_threshold_regular_bursts():
 )
 def test_log_isi_threshold_none_without_intraburst_peak(spikes):
     assert nap.compute_log_isi_threshold(spikes) is None
-    assert len(nap.detect_spike_bursts(spikes)) == 0
-    assert len(nap.detect_spike_bursts(spikes, fallback=False)) == 0
+    # no intra-burst peak at all: no bursts, and nothing to warn about
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        assert len(nap.detect_spike_bursts(spikes)) == 0
+        assert len(nap.detect_spike_bursts(spikes, fallback=True)) == 0
 
 
-def test_log_isi_fallback():
+def _train_without_clear_minimum():
     # Intra-burst peak at 10 ms, then a ramp of inter-burst intervals whose
-    # counts increase up to the last bin: no later peak, so no valley and the
-    # fallback threshold (max_cutoff) applies.
+    # counts increase up to the last bin: no later peak, so no clear minimum.
     isis = [0.01] * 300 + [
         v for k, v in enumerate(np.logspace(-1.6, -0.1, 15)) for _ in range(k + 1)
     ]
-    spikes = nap.Ts(t=np.cumsum(np.random.default_rng(0).permutation(isis)))
+    return nap.Ts(t=np.cumsum(np.random.default_rng(0).permutation(isis)))
+
+
+def test_log_isi_no_minimum_returns_no_bursts_and_warns():
+    spikes = _train_without_clear_minimum()
     assert nap.compute_log_isi_threshold(spikes) is None
-    with_fallback = nap.detect_spike_bursts(spikes)
+    with pytest.warns(UserWarning, match="No clear minimum.*Set `fallback=True`"):
+        bursts = nap.detect_spike_bursts(spikes)
+    assert len(bursts) == 0
+    # the published fallback is opt-in and does not warn
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with_fallback = nap.detect_spike_bursts(spikes, fallback=True)
     assert len(with_fallback) > 0
     assert np.all(np.asarray(with_fallback.n_spikes) >= 3)
-    assert len(nap.detect_spike_bursts(spikes, fallback=False)) == 0
+
+
+def test_log_isi_no_minimum_tsgroup_warns_once_with_units():
+    group = nap.TsGroup(
+        {
+            2: _train_without_clear_minimum(),
+            5: _regular_bursts(),
+            7: _train_without_clear_minimum(),
+        }
+    )
+    with pytest.warns(UserWarning, match=re.escape("unit(s) [2, 7]")) as record:
+        bursts = nap.detect_spike_bursts(group)
+    assert len(record) == 1
+    assert len(bursts[2]) == 0 and len(bursts[7]) == 0 and len(bursts[5]) == 200
 
 
 def test_log_isi_threshold_above_max_cutoff_extends_cores():
